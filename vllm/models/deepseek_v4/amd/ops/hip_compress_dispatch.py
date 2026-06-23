@@ -82,10 +82,14 @@ def hip_compressor_selected(head_dim: int, compress_ratio: int) -> bool:
     return kind in selected_hip_compressor_kinds()
 
 
-def bf16_state_cache_selected(head_dim: int, compress_ratio: int) -> bool:
-    return envs.VLLM_ROCM_DSV4_BF16_STATE_CACHE and hip_compressor_selected(
-        head_dim, compress_ratio
-    )
+def hip_compressor_runtime_available() -> bool:
+    """Return whether this ROCm process can use gfx950-only compressor kernels."""
+    try:
+        from vllm.platforms.rocm import on_gfx950
+
+        return on_gfx950()
+    except Exception:
+        return False
 
 
 def _aot_op(head_dim: int, compress_ratio: int):
@@ -109,7 +113,6 @@ def hip_compressor_supported(
     head_dim: int,
     compress_ratio: int,
     kv_cache: torch.Tensor,
-    use_bf16_state_cache: bool,
     allowed_shapes: frozenset[tuple[int, int]] | None = None,
 ) -> bool:
     """True iff the fused HIP compressor can serve this configuration.
@@ -123,18 +126,11 @@ def hip_compressor_supported(
     """
     if allowed_shapes is None:
         allowed_shapes = DEFAULT_HIP_COMPRESSOR_SHAPES
-    if not use_bf16_state_cache:
-        return False
     if (head_dim, compress_ratio) not in allowed_shapes:
         return False
     if kv_cache.dtype != torch.uint8:
         return False
-    try:
-        from vllm.platforms.rocm import on_gfx950
-
-        if not on_gfx950():
-            return False
-    except Exception:
+    if not hip_compressor_runtime_available():
         return False
     return _aot_op(head_dim, compress_ratio) is not None
 

@@ -225,16 +225,23 @@ class DeepseekCompressor(nn.Module):
         self.use_bf16_state_cache = False
         if current_platform.is_rocm():
             from .amd.ops.hip_compress_dispatch import (
-                bf16_state_cache_selected,
+                hip_compressor_runtime_available,
                 hip_compressor_selected,
             )
 
-            self.use_hip_compressor = hip_compressor_selected(
+            selected_hip_compressor = hip_compressor_selected(
                 self.head_dim, self.compress_ratio
             )
-            self.use_bf16_state_cache = bf16_state_cache_selected(
-                self.head_dim, self.compress_ratio
+            self.use_hip_compressor = (
+                selected_hip_compressor and hip_compressor_runtime_available()
             )
+            self.use_bf16_state_cache = self.use_hip_compressor
+            if selected_hip_compressor and not self.use_hip_compressor:
+                logger.warning_once(
+                    "VLLM_ROCM_DSV4_HIP_COMPRESSOR selected this compressor, "
+                    "but the fused HIP path is only available on gfx950. "
+                    "Falling back to Triton."
+                )
 
         state_dtype = torch.bfloat16 if self.use_bf16_state_cache else torch.float32
         self.ape = nn.Parameter(
@@ -422,27 +429,20 @@ class DeepseekCompressor(nn.Module):
                 self.head_dim,
                 self.compress_ratio,
                 kv_cache,
-                self.use_bf16_state_cache,
                 allowed_shapes=selected_hip_compressor_shapes(),
             ):
                 compress_norm_rope_store_fn = compress_norm_rope_store_hip
                 using_hip_compressor = True
-            elif self.use_bf16_state_cache:
+            else:
                 raise RuntimeError(
                     "VLLM_ROCM_DSV4_HIP_COMPRESSOR selected a fused HIP "
                     "compressor, but it is unavailable for this configuration "
                     "(requires gfx950, a registered _rocm_C op, a supported "
                     "(head_dim, compress_ratio), and the uint8 paged cache "
                     "layout). Triton cannot serve the bf16-state-cache path. "
-                    "Use a gfx950 build or disable "
-                    "VLLM_ROCM_DSV4_BF16_STATE_CACHE."
+                    "Use a gfx950 build with the paged uint8 cache layout or "
+                    "disable VLLM_ROCM_DSV4_HIP_COMPRESSOR."
                 )
-            else:
-                logger.warning_once(
-                    "VLLM_ROCM_DSV4_HIP_COMPRESSOR requires "
-                    "VLLM_ROCM_DSV4_BF16_STATE_CACHE=1; falling back to Triton."
-                )
-                compress_norm_rope_store_fn = compress_norm_rope_store_triton
             extra_kwargs = {}
         else:
             # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).

@@ -4,10 +4,9 @@
 
 Platform-agnostic — runs on any host (including non-ROCm CI). It asserts that
 ``hip_compressor_supported`` is True exactly when the device is gfx950 (CDNA4)
-with the _rocm_C ops built in, and always False otherwise (wrong arch, bf16
-state cache off, an unsupported/default-disabled shape, or a non-uint8 cache
-layout). The model relies on this gate to choose between the HIP op and the
-Triton fallback.
+with the _rocm_C ops built in, and always False otherwise (wrong arch, an
+unsupported/default-disabled shape, or a non-uint8 cache layout). The model
+relies on this gate to choose between the HIP op and the Triton fallback.
 """
 
 import pytest
@@ -44,23 +43,19 @@ def test_compressor_gated_on_gfx950():
     assert (128, 4) not in DEFAULT_HIP_COMPRESSOR_SHAPES
     assert (128, 4) in ALL_HIP_COMPRESSOR_SHAPES
 
-    # Default production mode supports CSA/HCA iff on gfx950.
+    # Default enabled mode supports CSA/HCA iff on gfx950.
     for head_dim, ratio in DEFAULT_HIP_COMPRESSOR_SHAPES:
-        assert hip_compressor_supported(head_dim, ratio, u8, True) == on
+        assert hip_compressor_supported(head_dim, ratio, u8) == on
 
     # Indexer is HIP-supported only when explicitly included by the caller.
-    assert not hip_compressor_supported(128, 4, u8, True)
+    assert not hip_compressor_supported(128, 4, u8)
     assert (
-        hip_compressor_supported(
-            128, 4, u8, True, allowed_shapes=ALL_HIP_COMPRESSOR_SHAPES
-        )
+        hip_compressor_supported(128, 4, u8, allowed_shapes=ALL_HIP_COMPRESSOR_SHAPES)
         == on
     )
 
-    # bf16 state cache off -> never supported (Triton has no bf16 path either).
-    assert not hip_compressor_supported(512, 4, u8, False)
     # Unsupported (head_dim, compress_ratio) -> never supported.
-    assert not hip_compressor_supported(256, 4, u8, True)
+    assert not hip_compressor_supported(256, 4, u8)
     # Non-uint8 (e.g. FlashInfer full-cache) layout -> never supported.
     bf16 = torch.empty(1, 16, dtype=torch.bfloat16)
-    assert not hip_compressor_supported(512, 4, bf16, True)
+    assert not hip_compressor_supported(512, 4, bf16)
