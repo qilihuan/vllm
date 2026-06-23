@@ -69,13 +69,11 @@ def detect_gfx950() -> bool:
     when gfx950 is among the target archs; the correctness tests skip otherwise.
     """
     try:
-        from vllm.platforms import current_platform
+        from vllm.models.deepseek_v4.amd.ops.hip_compress_dispatch import (
+            hip_compressor_runtime_available,
+        )
 
-        if not current_platform.is_rocm():
-            return False
-        from vllm.platforms.rocm import on_gfx950
-
-        return on_gfx950()
+        return hip_compressor_runtime_available()
     except Exception:
         return False
 
