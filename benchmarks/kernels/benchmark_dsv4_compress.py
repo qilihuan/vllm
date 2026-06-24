@@ -19,6 +19,10 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 KV_BLOCK_SIZE = 16
 RMS_EPS = 1e-6
 SEED = 2026
+DEFAULT_ROUNDS = 7
+DEFAULT_LAUNCHES = 100
+GRAPH_REPS = 5
+GRAPH_WARMUP = 5
 
 
 @dataclass(frozen=True)
@@ -363,7 +367,7 @@ def run_hip(inputs: BenchmarkInput, kv_cache: torch.Tensor) -> None:
         torch.ops._rocm_C.dsv4_csa_compress(*common)
 
 
-def graph_replay_us(fn, launches: int, reps: int, warmup: int) -> float:
+def graph_replay_us(fn, launches: int) -> float:
     graph = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
@@ -373,12 +377,12 @@ def graph_replay_us(fn, launches: int, reps: int, warmup: int) -> float:
     with torch.cuda.graph(graph):
         for _ in range(launches):
             fn()
-    for _ in range(warmup):
+    for _ in range(GRAPH_WARMUP):
         graph.replay()
     torch.cuda.synchronize()
 
     samples = []
-    for _ in range(reps):
+    for _ in range(GRAPH_REPS):
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
@@ -389,21 +393,10 @@ def graph_replay_us(fn, launches: int, reps: int, warmup: int) -> float:
     return statistics.median(samples)
 
 
-def median_min_max(values: list[float]) -> tuple[float, float, float]:
-    return statistics.median(values), min(values), max(values)
-
-
-def format_range(values: tuple[float, float, float]) -> str:
-    median, low, high = values
-    return f"{median:.2f}[{low:.2f}-{high:.2f}]"
-
-
 def benchmark_scenario(
     inputs: BenchmarkInput,
     rounds: int,
     launches: int,
-    reps: int,
-    warmup: int,
     have_triton: bool,
 ) -> dict:
     _, kv_cache = inputs.new_kv_cache()
@@ -418,74 +411,61 @@ def benchmark_scenario(
 
     hip_times, triton_times, ratios = [], [], []
     for _ in range(rounds):
-        hip_us = graph_replay_us(hip_fn, launches, reps, warmup)
+        hip_us = graph_replay_us(hip_fn, launches)
         hip_times.append(hip_us)
         if triton_fn is not None:
-            triton_us = graph_replay_us(triton_fn, launches, reps, warmup)
+            triton_us = graph_replay_us(triton_fn, launches)
             triton_times.append(triton_us)
             ratios.append(hip_us / triton_us)
 
-    result = {"scenario": inputs.name, "hip": median_min_max(hip_times)}
+    result = {
+        "shape": inputs.shape.name,
+        "scenario": inputs.name,
+        "hip": statistics.median(hip_times),
+    }
     if triton_times:
-        result["triton"] = median_min_max(triton_times)
-        result["ratio"] = median_min_max(ratios)
+        result["triton"] = statistics.median(triton_times)
+        result["ratio"] = statistics.median(ratios)
     return result
 
 
-def print_results(shape: ShapeConfig, results: list[dict], markdown: bool) -> None:
-    if markdown:
-        print(f"#### {shape.name}")
-        print()
-        print(
-            "| Scenario | Triton us/launch | HIP us/launch | "
-            "HIP/Triton median[min..max] |"
-        )
-        print("|---|---:|---:|---:|")
-        for result in results:
-            triton = f"{result['triton'][0]:.1f}" if "triton" in result else "n/a"
-            ratio = format_range(result["ratio"]) if "ratio" in result else "n/a"
-            print(
-                f"| {result['scenario']} | {triton} | "
-                f"{result['hip'][0]:.1f} | {ratio} |"
-            )
-    else:
-        rows = []
-        for result in results:
-            rows.append(
-                [
-                    result["scenario"],
-                    f"{result['triton'][0]:.1f}" if "triton" in result else "n/a",
-                    f"{result['hip'][0]:.1f}",
-                    format_range(result["ratio"]) if "ratio" in result else "n/a",
-                ]
-            )
-        print(f"DeepSeek-V4 compressor benchmark ({shape.name})")
-        print("HIP/Triton < 1.0 means HIP is faster. Times are us/launch.")
-        print(
-            tabulate(
-                rows,
-                headers=["scenario", "triton", "hip", "hip/triton"],
-                tablefmt="github",
-            )
+def print_results(results: list[dict]) -> None:
+    rows = []
+    ratios_by_shape: dict[str, list[float]] = {}
+    for result in results:
+        ratio = result.get("ratio")
+        if ratio is not None:
+            ratios_by_shape.setdefault(result["shape"], []).append(ratio)
+        rows.append(
+            [
+                result["shape"],
+                result["scenario"],
+                f"{result['triton']:.1f}" if "triton" in result else "n/a",
+                f"{result['hip']:.1f}",
+                f"{ratio:.3f}" if ratio is not None else "n/a",
+            ]
         )
 
-    ratios = [result["ratio"][0] for result in results if "ratio" in result]
-    if ratios:
-        print()
-        print(f"Geomean HIP/Triton: {statistics.geometric_mean(ratios):.3f}")
+    for shape, ratios in ratios_by_shape.items():
+        rows.append(
+            [shape, "geomean", "-", "-", f"{statistics.geometric_mean(ratios):.3f}"]
+        )
+
+    print(
+        tabulate(
+            rows,
+            headers=["shape", "scenario", "triton (us)", "hip (us)", "hip/triton"],
+            tablefmt="github",
+        )
+    )
 
 
 def parse_args():
     parser = FlexibleArgumentParser(
         description="Benchmark DeepSeek-V4 ROCm gfx950 compressor kernels."
     )
-    parser.add_argument("--shape", choices=sorted(SHAPES), default="csa")
-    parser.add_argument("--rounds", type=int, default=7)
-    parser.add_argument("--launches", type=int, default=100)
-    parser.add_argument("--reps", type=int, default=5)
-    parser.add_argument("--warmup", type=int, default=5)
-    parser.add_argument("--scenarios", nargs="*", default=DEFAULT_SCENARIOS)
-    parser.add_argument("--markdown", action="store_true")
+    parser.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
+    parser.add_argument("--launches", type=int, default=DEFAULT_LAUNCHES)
     return parser.parse_args()
 
 
@@ -497,23 +477,21 @@ def main() -> None:
     if not hip_available():
         raise SystemExit("dsv4 compressor ops are not registered in _rocm_C")
 
-    shape = SHAPES[args.shape]
-    have_triton = shape.quant_format != "indexer_mxfp4"
     results = []
-    for scenario_name in args.scenarios:
-        inputs = build_input(shape, scenario_name)
-        results.append(
-            benchmark_scenario(
-                inputs,
-                rounds=args.rounds,
-                launches=args.launches,
-                reps=args.reps,
-                warmup=args.warmup,
-                have_triton=have_triton,
+    for shape in SHAPES.values():
+        have_triton = shape.quant_format != "indexer_mxfp4"
+        for scenario_name in DEFAULT_SCENARIOS:
+            inputs = build_input(shape, scenario_name)
+            results.append(
+                benchmark_scenario(
+                    inputs,
+                    rounds=args.rounds,
+                    launches=args.launches,
+                    have_triton=have_triton,
+                )
             )
-        )
 
-    print_results(shape, results, markdown=args.markdown)
+    print_results(results)
 
 
 if __name__ == "__main__":
