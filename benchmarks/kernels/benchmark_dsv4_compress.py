@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark DeepSeek-V4 ROCm gfx950 compressor kernels."""
 
-import statistics
 from dataclasses import dataclass
+from statistics import geometric_mean
 
 import torch
 from tabulate import tabulate
@@ -14,15 +14,12 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     save_partial_states,
 )
+from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 KV_BLOCK_SIZE = 16
 RMS_EPS = 1e-6
 SEED = 2026
-DEFAULT_ROUNDS = 7
-DEFAULT_LAUNCHES = 100
-GRAPH_REPS = 5
-GRAPH_WARMUP = 5
 
 
 @dataclass(frozen=True)
@@ -49,7 +46,7 @@ class ShapeConfig:
             return self.head_dim
         if self.quant_format == "indexer_mxfp4":
             return self.head_dim // 2
-        return (self.head_dim - self.rope_head_dim) + self.rope_head_dim * 2
+        return self.head_dim + self.rope_head_dim
 
     @property
     def scale_dim(self) -> int:
@@ -68,22 +65,19 @@ class ShapeConfig:
         return 64
 
 
-SHAPES = {
-    "csa": ShapeConfig("csa_main", 512, 64, 4, True, 4, "csa"),
-    "hca": ShapeConfig("hca_main", 512, 64, 128, False, 8, "hca"),
-    "indexer_fp8": ShapeConfig("indexer_fp8", 128, 64, 4, True, 4, "indexer_fp8"),
-    "indexer_mxfp4": ShapeConfig(
-        "indexer_mxfp4", 128, 64, 4, True, 4, "indexer_mxfp4"
-    ),
-}
-
-DEFAULT_SCENARIOS = [
+SHAPES = (
+    ShapeConfig("csa_main", 512, 64, 4, True, 4, "csa"),
+    ShapeConfig("hca_main", 512, 64, 128, False, 8, "hca"),
+    ShapeConfig("indexer_fp8", 128, 64, 4, True, 4, "indexer_fp8"),
+    ShapeConfig("indexer_mxfp4", 128, 64, 4, True, 4, "indexer_mxfp4"),
+)
+SCENARIOS = (
     "decode_boundary",
     "prefill_256",
     "prefill_1024",
     "prefill_4096",
     "prefill_32768",
-]
+)
 
 
 class KVCacheMetadata:
@@ -106,19 +100,17 @@ class BenchmarkInput:
     cos_sin_cache: torch.Tensor
     rms_weight: torch.Tensor
     num_tokens: int
-    num_compressed_tokens: int
     num_kv_blocks: int
     kv_block_bytes: int
 
-    def new_kv_cache(self) -> tuple[torch.Tensor, torch.Tensor]:
-        flat = torch.empty(
+    def new_kv_cache(self) -> torch.Tensor:
+        return torch.zeros(
             self.num_kv_blocks,
+            KV_BLOCK_SIZE,
             self.kv_block_bytes,
             dtype=torch.uint8,
             device="cuda",
         )
-        flat.zero_()
-        return flat, flat.view(self.num_kv_blocks, KV_BLOCK_SIZE, -1)
 
     def common_kwargs(self, kv_cache: torch.Tensor) -> dict:
         shape = self.shape
@@ -147,68 +139,49 @@ class BenchmarkInput:
         )
 
 
-def _compressed_slot_mapping(positions: list[int], ratio: int) -> list[int]:
-    kv_slot_mapping = []
-    compressed_idx = 0
-    for position in positions:
-        if (position + 1) % ratio == 0:
-            kv_slot_mapping.append(compressed_idx)
-            compressed_idx += 1
-        else:
-            kv_slot_mapping.append(-1)
-    return kv_slot_mapping
-
-
-def _prefill_scenario(seqlen: int) -> tuple[str, list[int], list[int], list[int]]:
-    positions = list(range(seqlen))
-    return f"prefill_{seqlen}", positions, [0] * seqlen, positions
-
-
-def _decode_boundary_scenario(
-    shape: ShapeConfig,
-) -> tuple[str, list[int], list[int], list[int]]:
-    # Boundary positions for both ratio=4 and ratio=128. Include the look-back
-    # tokens in the same request so HCA/CSA state reads are fully populated.
-    boundary_positions = [127, 255, 383, 511]
-    positions, req_indices, slots = [], [], []
-    context_len = 4096
-    for req_idx, max_position in enumerate(boundary_positions):
-        for position in range(max_position + 1):
-            positions.append(position)
-            req_indices.append(req_idx)
-            slots.append(req_idx * context_len + position)
-    return "decode_boundary", positions, req_indices, slots
-
-
 def _scenario(
     shape: ShapeConfig,
     name: str,
-) -> tuple[str, list[int], list[int], list[int]]:
+) -> tuple[list[int], list[int], list[int]]:
     if name == "decode_boundary":
-        return _decode_boundary_scenario(shape)
-    if name.startswith("prefill_"):
-        return _prefill_scenario(int(name.removeprefix("prefill_")))
-    available = ["decode_boundary", *[f"prefill_{n}" for n in [256, 1024, 4096, 32768]]]
-    raise ValueError(f"Unknown scenario {name!r}. Available scenarios: {available}")
+        positions, req_indices, slots = [], [], []
+        context_len = 4096
+        for req_idx, max_position in enumerate([127, 255, 383, 511]):
+            for position in range(max_position + 1):
+                positions.append(position)
+                req_indices.append(req_idx)
+                slots.append(req_idx * context_len + position)
+        return positions, req_indices, slots
+
+    seq_len = int(name.removeprefix("prefill_"))
+    positions = list(range(seq_len))
+    return positions, [0] * seq_len, positions
 
 
-def _build_block_table(
+def _kv_slot_mapping(positions: list[int], ratio: int) -> list[int]:
+    kv_slots = []
+    next_slot = 0
+    for position in positions:
+        if (position + 1) % ratio == 0:
+            kv_slots.append(next_slot)
+            next_slot += 1
+        else:
+            kv_slots.append(-1)
+    return kv_slots
+
+
+def _block_table(
     positions: list[int],
     token_to_req: list[int],
     slot_mapping: list[int],
-    state_block_size: int,
+    block_size: int,
 ) -> torch.Tensor:
-    num_reqs = max(token_to_req) + 1 if token_to_req else 1
-    max_logical_block = max(positions) // state_block_size + 2
-    block_table = torch.zeros(
-        num_reqs,
-        max_logical_block,
-        dtype=torch.int32,
-        device="cuda",
-    )
+    num_reqs = max(token_to_req) + 1
+    num_blocks = max(positions) // block_size + 2
+    table = torch.zeros(num_reqs, num_blocks, dtype=torch.int32, device="cuda")
     for req_idx, position, slot in zip(token_to_req, positions, slot_mapping):
-        block_table[req_idx, position // state_block_size] = slot // state_block_size
-    return block_table
+        table[req_idx, position // block_size] = slot // block_size
+    return table
 
 
 def _cos_sin_cache(max_position: int, rope_head_dim: int) -> torch.Tensor:
@@ -226,11 +199,10 @@ def _cos_sin_cache(max_position: int, rope_head_dim: int) -> torch.Tensor:
     return torch.cat([freqs.cos(), freqs.sin()], dim=-1)
 
 
-def build_input(shape: ShapeConfig, scenario_name: str) -> BenchmarkInput:
-    name, positions, token_to_req, slot_mapping = _scenario(shape, scenario_name)
+def build_input(shape: ShapeConfig, scenario: str) -> BenchmarkInput:
+    positions, token_to_req, slot_mapping = _scenario(shape, scenario)
     num_tokens = len(positions)
-    kv_slot_mapping = _compressed_slot_mapping(positions, shape.ratio)
-    num_compressed_tokens = sum(slot >= 0 for slot in kv_slot_mapping)
+    kv_slot_mapping = _kv_slot_mapping(positions, shape.ratio)
 
     generator = torch.Generator(device="cuda").manual_seed(SEED + num_tokens)
     kv = torch.randn(
@@ -260,12 +232,14 @@ def build_input(shape: ShapeConfig, scenario_name: str) -> BenchmarkInput:
     slot_mapping_t = torch.tensor(slot_mapping, dtype=torch.int64, device="cuda")
     kv_slot_mapping_t = torch.tensor(kv_slot_mapping, dtype=torch.int64, device="cuda")
 
-    max_slot = max(slot_mapping) if slot_mapping else 0
-    num_state_blocks = max_slot // shape.state_block_size + 4
-    state_shape = (num_state_blocks, shape.state_block_size, 2 * shape.state_width)
+    max_slot = max(slot_mapping)
+    state_shape = (
+        max_slot // shape.state_block_size + 4,
+        shape.state_block_size,
+        2 * shape.state_width,
+    )
     state_cache_fp32 = torch.zeros(state_shape, dtype=torch.float32, device="cuda")
     state_cache_bf16 = torch.zeros(state_shape, dtype=torch.bfloat16, device="cuda")
-
     save_partial_states(
         kv=kv,
         score=score,
@@ -289,15 +263,14 @@ def build_input(shape: ShapeConfig, scenario_name: str) -> BenchmarkInput:
         compress_ratio=shape.ratio,
     )
 
-    num_kv_blocks = num_compressed_tokens // KV_BLOCK_SIZE + 4
-    kv_block_bytes = KV_BLOCK_SIZE * (shape.token_stride + shape.scale_dim)
+    num_compressed_tokens = sum(slot >= 0 for slot in kv_slot_mapping)
     return BenchmarkInput(
-        name=name,
+        name=scenario,
         shape=shape,
         positions=positions_t,
         token_to_req_indices=token_to_req_t,
         slot_mapping=slot_mapping_t,
-        block_table=_build_block_table(
+        block_table=_block_table(
             positions, token_to_req, slot_mapping, shape.state_block_size
         ),
         kv_slot_mapping=kv_slot_mapping_t,
@@ -307,9 +280,8 @@ def build_input(shape: ShapeConfig, scenario_name: str) -> BenchmarkInput:
         cos_sin_cache=_cos_sin_cache(max(positions), shape.rope_head_dim),
         rms_weight=rms_weight,
         num_tokens=num_tokens,
-        num_compressed_tokens=num_compressed_tokens,
-        num_kv_blocks=num_kv_blocks,
-        kv_block_bytes=kv_block_bytes,
+        num_kv_blocks=num_compressed_tokens // KV_BLOCK_SIZE + 4,
+        kv_block_bytes=shape.token_stride + shape.scale_dim,
     )
 
 
@@ -367,89 +339,65 @@ def run_hip(inputs: BenchmarkInput, kv_cache: torch.Tensor) -> None:
         torch.ops._rocm_C.dsv4_csa_compress(*common)
 
 
-def graph_replay_us(fn, launches: int) -> float:
-    graph = torch.cuda.CUDAGraph()
-    stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
-        for _ in range(3):
-            fn()
-    torch.cuda.current_stream().wait_stream(stream)
-    with torch.cuda.graph(graph):
-        for _ in range(launches):
-            fn()
-    for _ in range(GRAPH_WARMUP):
-        graph.replay()
-    torch.cuda.synchronize()
-
-    samples = []
-    for _ in range(GRAPH_REPS):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        graph.replay()
-        end.record()
-        torch.cuda.synchronize()
-        samples.append(start.elapsed_time(end) * 1000.0 / launches)
-    return statistics.median(samples)
+def do_bench_us(fn) -> tuple[float, float, float]:
+    ms, min_ms, max_ms = triton.testing.do_bench(
+        fn,
+        quantiles=[0.5, 0.2, 0.8],
+    )
+    return 1000 * ms, 1000 * min_ms, 1000 * max_ms
 
 
-def benchmark_scenario(
-    inputs: BenchmarkInput,
-    rounds: int,
-    launches: int,
-    have_triton: bool,
-) -> dict:
-    _, kv_cache = inputs.new_kv_cache()
-    hip_fn = lambda: run_hip(inputs, kv_cache)
-    triton_fn = (lambda: run_triton(inputs, kv_cache)) if have_triton else None
+def benchmark_one(inputs: BenchmarkInput) -> tuple[str, str, str, str, str]:
+    hip_cache = inputs.new_kv_cache()
+    hip_us, _, _ = do_bench_us(lambda: run_hip(inputs, hip_cache))
 
-    for _ in range(30):
-        if triton_fn is not None:
-            triton_fn()
-        hip_fn()
-    torch.cuda.synchronize()
+    if inputs.shape.quant_format == "indexer_mxfp4":
+        return inputs.shape.name, inputs.name, "n/a", f"{hip_us:.1f}", "n/a"
 
-    hip_times, triton_times, ratios = [], [], []
-    for _ in range(rounds):
-        hip_us = graph_replay_us(hip_fn, launches)
-        hip_times.append(hip_us)
-        if triton_fn is not None:
-            triton_us = graph_replay_us(triton_fn, launches)
-            triton_times.append(triton_us)
-            ratios.append(hip_us / triton_us)
-
-    result = {
-        "shape": inputs.shape.name,
-        "scenario": inputs.name,
-        "hip": statistics.median(hip_times),
-    }
-    if triton_times:
-        result["triton"] = statistics.median(triton_times)
-        result["ratio"] = statistics.median(ratios)
-    return result
+    triton_cache = inputs.new_kv_cache()
+    triton_us, _, _ = do_bench_us(lambda: run_triton(inputs, triton_cache))
+    return (
+        inputs.shape.name,
+        inputs.name,
+        f"{triton_us:.1f}",
+        f"{hip_us:.1f}",
+        f"{hip_us / triton_us:.3f}",
+    )
 
 
-def print_results(results: list[dict]) -> None:
+def parse_args():
+    parser = FlexibleArgumentParser(
+        description="Benchmark DeepSeek-V4 ROCm gfx950 compressor kernels."
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    parse_args()
+    torch.set_default_device("cuda")
+    if not torch.cuda.is_available():
+        raise SystemExit("CUDA/HIP device is not available")
+    if not hip_available():
+        raise SystemExit("dsv4 compressor ops are not registered in _rocm_C")
+
     rows = []
-    ratios_by_shape: dict[str, list[float]] = {}
-    for result in results:
-        ratio = result.get("ratio")
-        if ratio is not None:
-            ratios_by_shape.setdefault(result["shape"], []).append(ratio)
-        rows.append(
-            [
-                result["shape"],
-                result["scenario"],
-                f"{result['triton']:.1f}" if "triton" in result else "n/a",
-                f"{result['hip']:.1f}",
-                f"{ratio:.3f}" if ratio is not None else "n/a",
-            ]
-        )
-
-    for shape, ratios in ratios_by_shape.items():
-        rows.append(
-            [shape, "geomean", "-", "-", f"{statistics.geometric_mean(ratios):.3f}"]
-        )
+    for shape in SHAPES:
+        ratios = []
+        for scenario in SCENARIOS:
+            row = benchmark_one(build_input(shape, scenario))
+            rows.append(row)
+            if row[-1] != "n/a":
+                ratios.append(float(row[-1]))
+        if ratios:
+            rows.append(
+                (
+                    shape.name,
+                    "geomean",
+                    "-",
+                    "-",
+                    f"{geometric_mean(ratios):.3f}",
+                )
+            )
 
     print(
         tabulate(
@@ -458,40 +406,6 @@ def print_results(results: list[dict]) -> None:
             tablefmt="github",
         )
     )
-
-
-def parse_args():
-    parser = FlexibleArgumentParser(
-        description="Benchmark DeepSeek-V4 ROCm gfx950 compressor kernels."
-    )
-    parser.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
-    parser.add_argument("--launches", type=int, default=DEFAULT_LAUNCHES)
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    torch.set_default_device("cuda")
-    if not torch.cuda.is_available():
-        raise SystemExit("CUDA/HIP device is not available")
-    if not hip_available():
-        raise SystemExit("dsv4 compressor ops are not registered in _rocm_C")
-
-    results = []
-    for shape in SHAPES.values():
-        have_triton = shape.quant_format != "indexer_mxfp4"
-        for scenario_name in DEFAULT_SCENARIOS:
-            inputs = build_input(shape, scenario_name)
-            results.append(
-                benchmark_scenario(
-                    inputs,
-                    rounds=args.rounds,
-                    launches=args.launches,
-                    have_triton=have_triton,
-                )
-            )
-
-    print_results(results)
 
 
 if __name__ == "__main__":
