@@ -3,7 +3,6 @@
 """Benchmark DeepSeek-V4 ROCm gfx950 compressor kernels."""
 
 from dataclasses import dataclass
-from statistics import geometric_mean
 
 import torch
 from tabulate import tabulate
@@ -382,22 +381,9 @@ def main() -> None:
 
     rows = []
     for shape in SHAPES:
-        ratios = []
         for scenario in SCENARIOS:
             row = benchmark_one(build_input(shape, scenario))
             rows.append(row)
-            if row[-1] != "n/a":
-                ratios.append(float(row[-1]))
-        if ratios:
-            rows.append(
-                (
-                    shape.name,
-                    "geomean",
-                    "-",
-                    "-",
-                    f"{geometric_mean(ratios):.3f}",
-                )
-            )
 
     print(
         tabulate(
