@@ -32,16 +32,17 @@ Usage (run from the repo root so ``tests`` is importable):
 """
 
 import argparse
-import os
 import statistics
 import sys
+from pathlib import Path
 
 import torch
 
 # Reuse the test scaffolding (scenario/state-cache builders + runners). The
 # helpers live under tests/; add the repo root to sys.path so this script runs
 # standalone regardless of cwd.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 
 from tests.kernels.attention.dsv4_compress_utils import (  # noqa: E402
     CSA_MAIN,
@@ -111,6 +112,11 @@ def _median_min_max(xs):
     return statistics.median(xs), min(xs), max(xs)
 
 
+def _format_range(median_min_max: tuple[float, float, float]) -> str:
+    median, low, high = median_min_max
+    return f"{median:.2f}[{low:.2f}-{high:.2f}]"
+
+
 def bench_scenario(ctx, rounds, n, have_triton):
     ctx.build()
     build_shared_input(ctx)
@@ -165,14 +171,18 @@ def main():
         default=None,
         help="scenario names (default: representative subset)",
     )
+    ap.add_argument(
+        "--format",
+        choices=["text", "markdown"],
+        default="text",
+        help="output format (default: text)",
+    )
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
-        print("CUDA not available")
-        return
+        raise SystemExit("CUDA/HIP device is not available")
     if not hip_available():
-        print("dsv4 compressor ops not registered in _rocm_C (gfx950 only)")
-        return
+        raise SystemExit("dsv4 compressor ops are not registered in _rocm_C")
 
     shape = SHAPES[args.shape]
     # Triton MXFP4 uses NVIDIA PTX and can't run on AMD -> HIP-only for mxfp4.
@@ -182,8 +192,35 @@ def main():
     wanted = args.scenarios if args.scenarios else DEFAULT_SCENARIOS
     missing = set(wanted) - set(all_ctx)
     if missing:
-        print(f"unknown scenarios: {sorted(missing)}")
-        print(f"available: {sorted(all_ctx)}")
+        raise SystemExit(
+            f"unknown scenarios: {sorted(missing)}; "
+            f"available: {sorted(all_ctx)}"
+        )
+
+    results = []
+    ratios = []
+    for name in wanted:
+        r = bench_scenario(all_ctx[name], args.rounds, args.launches, have_triton)
+        if "ratio" in r:
+            ratios.append(r["ratio"][0])
+        results.append(r)
+
+    if args.format == "markdown":
+        print(f"#### {shape.label}")
+        print()
+        print(
+            "| Scenario | Triton us/launch | HIP us/launch | "
+            "HIP/Triton median[min..max] |"
+        )
+        print("|---|---:|---:|---:|")
+        for r in results:
+            triton = f"{r['triton'][0]:.1f}" if "triton" in r else "n/a"
+            ratio = _format_range(r["ratio"]) if "ratio" in r else "n/a"
+            print(f"| {r['name']} | {triton} | {r['hip'][0]:.1f} | {ratio} |")
+        if ratios:
+            g = statistics.geometric_mean(ratios)
+            print()
+            print(f"Geomean HIP/Triton: **{g:.3f}**.")
         return
 
     print(
@@ -199,21 +236,11 @@ def main():
     print(hdr)
     print("-" * len(hdr))
 
-    def fmt_r(mmm):
-        m, lo, hi = mmm
-        return f"{m:.2f}[{lo:.2f}-{hi:.2f}]"
-
-    ratios = []
-    for name in wanted:
-        r = bench_scenario(all_ctx[name], args.rounds, args.launches, have_triton)
-        line = f"{name:<16}"
+    for r in results:
+        line = f"{r['name']:<16}"
         line += f"{r['triton'][0]:>10.1f}" if "triton" in r else f"{'n/a':>10}"
         line += f"{r['hip'][0]:>10.1f}"
-        if "ratio" in r:
-            line += f"{fmt_r(r['ratio']):>16}"
-            ratios.append(r["ratio"][0])
-        else:
-            line += f"{'n/a':>16}"
+        line += f"{_format_range(r['ratio']):>16}" if "ratio" in r else f"{'n/a':>16}"
         print(line)
 
     if ratios:
