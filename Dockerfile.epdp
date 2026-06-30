@@ -1,0 +1,35 @@
+# vLLM EPDP (DP8+EP8) with weight sharding fix
+# Base: sabreshao/vllm:aiter_0620_full
+# vLLM: qilihuan/vllm@epdp-support (Fangzhou + EP weight sharding fix)
+
+FROM sabreshao/vllm:aiter_0620_full
+
+# Remove original vLLM
+RUN pip uninstall -y vllm || true
+RUN rm -rf /app/vllm 2>/dev/null || true
+
+# Clone fixed vLLM
+RUN git clone https://github.com/qilihuan/vllm.git /app/vllm && \
+    cd /app/vllm && \
+    git checkout epdp-support && \
+    echo "vLLM branch: $(git rev-parse --abbrev-ref HEAD)" && \
+    echo "vLLM commit: $(git rev-parse --short HEAD)" && \
+    git log --oneline -3
+
+# Install vLLM from source
+WORKDIR /app/vllm
+RUN MAX_JOBS=8 VLLM_TARGET_DEVICE=rocm pip install --no-build-isolation -e .
+
+# Verify installation
+RUN echo "=== Verification ===" && \
+    python3 -c "from vllm import __version__; print(f'vLLM version: {__version__}')" && \
+    python3 -c "from vllm.config import ParallelConfig; print(f'enable_dp_attention field exists: {hasattr(ParallelConfig, \"enable_dp_attention\")}')" && \
+    grep -q "enable_dp_attention = getattr" /app/vllm/vllm/model_executor/layers/fused_moe/config.py && \
+    echo "✅ EP weight sharding fix verified"
+
+WORKDIR /workspace
+
+ENV VLLM_EPDP_VERSION=1.1 \
+    VLLM_EPDP_FIX=ep_weight_sharding
+
+CMD ["/bin/bash"]

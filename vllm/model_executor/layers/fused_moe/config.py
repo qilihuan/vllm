@@ -1219,6 +1219,15 @@ class FusedMoEParallelConfig:
         # parallel update tp_size, tp_rank, ep_size and ep_rank to reflect that.
         ep_size = tp_size
         ep_rank = tp_rank
+
+        # DEBUG: Log ep_size calculation
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"[EPDP DEBUG] FusedMoEParallelConfig.make(): "
+                      f"tp_size_={tp_size_}, dp_size_={dp_size_}, "
+                      f"flattened tp_size={tp_size}, tp_rank={tp_rank}, "
+                      f"final ep_size={ep_size}, ep_rank={ep_rank}")
+
         return FusedMoEParallelConfig(
             tp_size=1,
             tp_rank=0,
