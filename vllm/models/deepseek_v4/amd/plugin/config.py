@@ -179,7 +179,10 @@ def _generate_dsv4_config_from_vllm_config(config: Any) -> PluginConfig:
         load_dummy=False,
         enable_expert_parallel=vllm_parallel_config.enable_expert_parallel,
         master_addr=None,
-        enable_dp_attention=False,
+        enable_dp_attention=(
+            vllm_parallel_config.enable_expert_parallel
+            and getattr(vllm_parallel_config, "enable_dp_attention", False)
+        ),
         plugin_config=plugin_config,
         speculative_config=dsv4_speculative_config,
         online_quant_config=(getattr(config, "additional_config", None) or {}).get(
