@@ -1,0 +1,16 @@
+FROM sabreshao/vllm:aiter_0620_full
+
+RUN pip uninstall -y vllm || true
+RUN rm -rf /app/vllm 2>/dev/null || true
+
+RUN git clone https://github.com/qilihuan/vllm.git /app/vllm && \
+    cd /app/vllm && \
+    git checkout epdp-support && \
+    git log --oneline -1
+
+WORKDIR /app/vllm
+RUN MAX_JOBS=8 VLLM_TARGET_DEVICE=rocm pip install --no-build-isolation -e .
+
+WORKDIR /workspace
+ENV VLLM_EPDP_VERSION=debug
+CMD ["/bin/bash"]
