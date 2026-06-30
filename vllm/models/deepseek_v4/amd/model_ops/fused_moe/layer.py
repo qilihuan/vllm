@@ -155,6 +155,18 @@ class FusedMoEParallelConfig:
         # parallel update tp_size, tp_rank, ep_size and ep_rank to reflect that.
         ep_size = tp_size
         ep_rank = tp_rank
+
+        # DEBUG: Print configuration
+        print(f"\n{'='*80}")
+        print(f"[EPDP DEBUG - ATOM] FusedMoEParallelConfig.make()")
+        print(f"  Input: tp_size_={tp_size_}, dp_size_={dp_size_}")
+        print(f"  enable_dp_attention={enable_dp_attention}")
+        print(f"  Flatten branch: {'YES (enable_dp_attention=True)' if enable_dp_attention else 'NO (enable_dp_attention=False)'}")
+        print(f"  After conditional flatten: tp_size={tp_size}, tp_rank={tp_rank}")
+        print(f"  Final EP config: ep_size={ep_size}, ep_rank={ep_rank}")
+        print(f"  Expected: ep_size should be 8 for DP8+EP8 mode")
+        print(f"{'='*80}\n")
+
         return FusedMoEParallelConfig(
             tp_size=1,
             tp_rank=0,
