@@ -11,7 +11,7 @@ weight-only matmul, rather than a fused int8 GEMM.
 from collections.abc import Callable
 
 import torch
-from compressed_tensors.compressors.pack_quantized.helpers import pack_to_int32
+from compressed_tensors import pack_to_int32
 
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,

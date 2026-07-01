@@ -22,14 +22,7 @@ logger = init_logger(__name__)
 
 def _import_unpack_from_int32():
     """Import compressed-tensors' ``unpack_from_int32`` across versions."""
-    try:
-        from compressed_tensors.compressors.pack_quantized.helpers import (
-            unpack_from_int32,
-        )
-    except ImportError:
-        from compressed_tensors.compressors.quantized_compressors.pack_quantized import (  # type: ignore[import-not-found]  # noqa: E501
-            unpack_from_int32,
-        )
+    from compressed_tensors import unpack_from_int32
     return unpack_from_int32
 
 
