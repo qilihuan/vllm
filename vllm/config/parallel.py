@@ -161,6 +161,10 @@ class ParallelConfig:
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    enable_dp_attention: bool = False
+    """Enable DP-attention mode for expert-parallel: fold DP dimension into EP
+    topology while keeping attention in DP mode. Only valid when
+    enable_expert_parallel=True."""
     enable_ep_weight_filter: bool = False
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
