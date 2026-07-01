@@ -98,7 +98,7 @@ def _run_vllm_requests(
     prequeue_requests: bool,
     enable_lora: bool,
 ) -> tuple[float, list[RequestOutput] | None]:
-    from vllm import SamplingParams
+    from vllm.sampling_params import SamplingParams
 
     prompts: list[TextPrompt | TokensPrompt] = []
     sampling_params: list[SamplingParams] = []
@@ -238,7 +238,7 @@ def _run_vllm_chat_requests(
     do_profile: bool,
     prequeue_requests: bool,
 ) -> tuple[float, list[RequestOutput]]:
-    from vllm import SamplingParams
+    from vllm.sampling_params import SamplingParams
 
     prompts = [request.prompt for request in requests]
     sampling_params: list[SamplingParams] = []
@@ -333,7 +333,7 @@ async def _run_vllm_async_requests(
     do_profile: bool,
     request_id_prefix: str,
 ) -> tuple[float, None]:
-    from vllm import SamplingParams
+    from vllm.sampling_params import SamplingParams
 
     prompts: list[TextPrompt | TokensPrompt] = []
     sampling_params: list[SamplingParams] = []
