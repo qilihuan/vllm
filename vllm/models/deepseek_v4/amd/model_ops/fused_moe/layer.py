@@ -2229,7 +2229,7 @@ class FusedMoE(torch.nn.Module):
             if config is not None and dsv4_config.torch_dtype != torch.float16
             else 1.0
         )
-        if self.use_ep:
+        if self.use_ep and self.expert_map is not None:
             expert_mask = torch.ones(
                 (self.global_num_experts + self.num_fused_shared_experts + 1,),
                 dtype=torch.int32,
