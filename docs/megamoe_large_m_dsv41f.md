@@ -7,7 +7,7 @@
 | commit | 内容 | 开关（默认） | 改输出 |
 |---|---|---|---|
 | prefill 走 large_m | DP 间每卡最大 token 数 ≥ 513 的 eager 调用改走 AITER `large_m`（一次量化 + 一个 persistent kernel） | `VLLM_ROCM_AITER_MEGA_MOE_LARGE_M`（1）、`VLLM_ROCM_AITER_MEGA_MOE_LARGE_M_MIN_TOKENS`（513） | 否（与多段 kernel 的 compact 路径逐位一致） |
-| 草稿 greedy markov 融合 | DSpark greedy 草稿的 5 步 markov 链：每步的 bias GEMM、加法、argmax、token 拷贝合成 2 个 Triton launch | `VLLM_DSPARK_FUSED_GREEDY_MARKOV`（1） | 否（草稿 token 与原循环一致） |
+| 草稿 greedy markov 融合 | DSpark greedy 草稿的 5 步 markov 链：每步的 bias GEMM、加法、argmax、token 拷贝合成 2 个 Triton launch | `VLLM_DSPARK_FUSED_GREEDY_MARKOV`（1） | 否（只影响草稿；接受长度一致） |
 | 草稿 hc post 融合 | 草稿末尾的 hyper-connection post 由 fp32 torch einsum（约 7 个 kernel）改为 AITER 融合 `mhc_post`（与主模型层同一个 op） | `VLLM_DSPARK_FUSED_HC_POST`（1） | 否（只改草稿 hidden 的 bf16 舍入，目标模型逐个验证草稿 token） |
 
 ### prefill 走 large_m
@@ -32,7 +32,7 @@
 
 - greedy markov：step kernel 对每个词表块用一次 dot 算出所有请求的 markov bias，加上 base logits（按 head dtype 复现原循环的 bf16 舍入），取块内 argmax；pick kernel 归约各块、写 token 并 gather 下一步的 markov embedding。只在 greedy 草稿（`draft_logits` 为空）、无 acceptance estimator / confidence head / 词表裁剪 / watermark 时启用，其余情况走原循环。
 - hc post：`_aiter_mhc_supported`（hc 4，hidden % 256 == 0）时调 `torch.ops.vllm.mhc_post_aiter`，否则回到 einsum。
-- 默认打开的理由：两项都不改模型输出。markov 融合产生的草稿 token 与原循环逐个相同（真实 markov 权重，2 种负载 × 3 种子全部一致）；hc post 用的是主模型每层都在用的 op，与 einsum 相对误差 1.3e-5，只影响草稿，不影响目标模型验证后的输出。
+- 默认打开的理由：两项都不改目标模型验证后的输出，只影响草稿。markov 融合中 bias 的 fp32 求和顺序与原 GEMM 不同，bias 的最后一位可能不同，在 argmax 接近并列时草稿 token 可能与原循环不同；实测（真实 markov 权重，2 种负载 × 3 种子）草稿 token 全部一致，整网验收中接受长度一致。hc post 用的是主模型每层都在用的 op，与 einsum 相对误差 1.3e-5。草稿 token 的差异只影响接受率。
 
 ## 依赖：AITER 补丁
 
