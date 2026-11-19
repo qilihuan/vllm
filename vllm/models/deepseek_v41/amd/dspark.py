@@ -398,8 +398,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         (ops/fused_markov.py), and this returns True. For a step that the
         fused launches do not take, it returns False, having done nothing,
         and the speculator runs its own loop."""
-        from .ops import fused_markov
+        from .ops import fused_markov, fused_markov_greedy
 
+        if fused_markov_greedy.sample_sequential(speculator, num_reqs, head_hidden):
+            return True
         return fused_markov.sample_sequential(speculator, num_reqs, head_hidden)
 
     # --- Weight loading ----------------------------------------------------

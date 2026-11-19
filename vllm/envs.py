@@ -162,6 +162,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MEGA_MOE_SINGLE_KERNEL: bool = True
     VLLM_ROCM_AITER_MEGA_MOE_LARGE_M: bool = True
     VLLM_ROCM_AITER_MEGA_MOE_LARGE_M_MIN_TOKENS: int = 513
+    VLLM_DSPARK_FUSED_GREEDY_MARKOV: bool = True
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1477,6 +1478,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_AITER_MEGA_MOE_LARGE_M_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_AITER_MEGA_MOE_LARGE_M_MIN_TOKENS", "513")
+    ),
+    # DSpark greedy drafts: fuse each Markov step (bias GEMM + add + argmax)
+    # into two Triton launches (models/deepseek_v41/amd/ops/fused_markov_greedy.py).
+    # The drafted tokens are the loop's. By default is enabled.
+    "VLLM_DSPARK_FUSED_GREEDY_MARKOV": lambda: (
+        os.getenv("VLLM_DSPARK_FUSED_GREEDY_MARKOV", "1").lower() in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.
