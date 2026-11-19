@@ -160,6 +160,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_AITER_MEGA_MOE_SINGLE_KERNEL: bool = True
+    VLLM_ROCM_AITER_MEGA_MOE_LARGE_M: bool = True
+    VLLM_ROCM_AITER_MEGA_MOE_LARGE_M_MIN_TOKENS: int = 513
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1462,6 +1464,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_AITER_MEGA_MOE_SINGLE_KERNEL": lambda: (
         os.getenv("VLLM_ROCM_AITER_MEGA_MOE_SINGLE_KERNEL", "True").lower()
         in ("true", "1")
+    ),
+    # AITER MegaMoE (--moe-backend aiter_mega_moe): run eager batches of at
+    # least VLLM_ROCM_AITER_MEGA_MOE_LARGE_M_MIN_TOKENS tokens per rank (over
+    # all DP ranks), i.e. prefill, on AITER's large_m path (quantization plus
+    # one persistent kernel) where AITER supports the layout; it is built on
+    # the max_num_batched_tokens runtime with one protocol slot per layer.
+    # CUDA graph captures keep the 4-kernel MegaMoEV2 path.
+    # By default is enabled.
+    "VLLM_ROCM_AITER_MEGA_MOE_LARGE_M": lambda: (
+        os.getenv("VLLM_ROCM_AITER_MEGA_MOE_LARGE_M", "True").lower() in ("true", "1")
+    ),
+    "VLLM_ROCM_AITER_MEGA_MOE_LARGE_M_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_ROCM_AITER_MEGA_MOE_LARGE_M_MIN_TOKENS", "513")
     ),
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.
