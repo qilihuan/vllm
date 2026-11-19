@@ -163,6 +163,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MEGA_MOE_LARGE_M: bool = True
     VLLM_ROCM_AITER_MEGA_MOE_LARGE_M_MIN_TOKENS: int = 513
     VLLM_DSPARK_FUSED_GREEDY_MARKOV: bool = True
+    VLLM_DSPARK_FUSED_HC_POST: bool = True
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1484,6 +1485,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The drafted tokens are the loop's. By default is enabled.
     "VLLM_DSPARK_FUSED_GREEDY_MARKOV": lambda: (
         os.getenv("VLLM_DSPARK_FUSED_GREEDY_MARKOV", "1").lower() in ("true", "1")
+    ),
+    # DSpark: run the draft's final hyper-connection post with AITER's fused
+    # mhc_post (the op of the target's layers) instead of the torch einsum.
+    # It changes the drafts only (bf16 rounding). By default is enabled.
+    "VLLM_DSPARK_FUSED_HC_POST": lambda: (
+        os.getenv("VLLM_DSPARK_FUSED_HC_POST", "1").lower() in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.

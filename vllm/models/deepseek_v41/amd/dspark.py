@@ -21,7 +21,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.mhc.torch import mhc_post_torch
+from vllm.model_executor.kernels.mhc.torch import mhc_post_torch as _mhc_post_ref
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -552,3 +552,15 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         ):
             return f"model.{rest}"
         return f"model.layers.{stage}.{rest}"
+
+
+def mhc_post_torch(x, residual, post_mix, res_mix):
+    """The draft's final hyper-connection post. With VLLM_DSPARK_FUSED_HC_POST
+    it runs AITER's fused mhc_post, the op of the target's layers (one kernel),
+    instead of the fp32 torch einsum (~7 kernels)."""
+    if envs.VLLM_DSPARK_FUSED_HC_POST:
+        from vllm.model_executor.layers.mhc import _aiter_mhc_supported
+
+        if _aiter_mhc_supported(residual, None, supports_norm=True):
+            return torch.ops.vllm.mhc_post_aiter(x, residual, post_mix, res_mix)
+    return _mhc_post_ref(x, residual, post_mix, res_mix)
